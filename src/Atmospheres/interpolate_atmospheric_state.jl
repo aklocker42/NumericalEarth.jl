@@ -26,15 +26,13 @@ function EarthSystemModels.interpolate_state!(exchanger, grid, atmosphere::Presc
     atmosphere_tracers = (T = atmosphere.temperature.data,
                           q = atmosphere.specific_humidity.data)
 
+    precipitation_flux = atmosphere.precipitation_flux
+    rain_fts = isnothing(precipitation_flux) ? nothing : precipitation_flux.rain
+    snow_fts = isnothing(precipitation_flux) ? nothing : precipitation_flux.snow
+
     rainfall_flux = surface_rainfall_flux(atmosphere)
     snowfall_flux = surface_snowfall_flux(atmosphere)
     atmosphere_pressure = atmosphere.pressure.data
-
-    # Extract info for time-interpolation
-    u = atmosphere.velocities.u # for example
-    atmosphere_times = u.times
-    atmosphere_backend = u.backend
-    atmosphere_time_indexing = u.time_indexing
 
     atmosphere_fields = exchanger.state
     space_fractional_indices = exchanger.regridder
@@ -51,27 +49,37 @@ function EarthSystemModels.interpolate_state!(exchanger, grid, atmosphere::Presc
 
     kernel_parameters = interface_kernel_parameters(grid)
 
-    # Assumption, should be generalized
-    ua = atmosphere.velocities.u
-
-    times = ua.times
-    time_indexing = ua.time_indexing
+    # Each field is interpolated in time on its own time axis: a field whose reload
+    # window differs from u's (e.g. ERA5 precipitation, window-centred half an hour off
+    # the other instantaneous fields) must not be read using u's time index (issue
+    # NumericalEarth.jl#711 — ERA5's total_precipitation is stamped half an hour off
+    # u/v/T/q, so reusing u's reload schedule reads precipitation out of its own window).
     t = clock.time
-    time_interpolator = cpu_interpolating_time_indices(arch, times, time_indexing, t)
+    u_time_args    = time_arguments(arch, atmosphere.velocities.u,   t)
+    v_time_args    = time_arguments(arch, atmosphere.velocities.v,   t)
+    T_time_args    = time_arguments(arch, atmosphere.temperature,    t)
+    q_time_args    = time_arguments(arch, atmosphere.specific_humidity, t)
+    p_time_args    = time_arguments(arch, atmosphere.pressure,      t)
+    rain_time_args = time_arguments(arch, rain_fts,                 t)
+    snow_time_args = time_arguments(arch, snow_fts,                 t)
 
     launch!(arch, grid, kernel_parameters,
             _interpolate_primary_atmospheric_state!,
             atmosphere_data,
             space_fractional_indices,
-            time_interpolator,
             grid,
             atmosphere_velocities,
+            u_time_args,
+            v_time_args,
             atmosphere_tracers,
+            T_time_args,
+            q_time_args,
             atmosphere_pressure,
+            p_time_args,
             rainfall_flux,
+            rain_time_args,
             snowfall_flux,
-            atmosphere_backend,
-            atmosphere_time_indexing)
+            snow_time_args)
 
     # Set ocean barotropic pressure forcing
     #
@@ -88,17 +96,26 @@ end
 @inline get_fractional_index(i, j, ::Nothing) = nothing
 @inline get_fractional_index(i, j, frac) = @inbounds frac[i, j, 1]
 
+# Nothing-safe: a field the atmosphere doesn't carry (e.g. no precipitation_flux) has no
+# time axis to interpolate on; interp_atmos_time_series short-circuits on the ::Nothing data.
+time_arguments(arch, ::Nothing, t) = (nothing, nothing, nothing)
+time_arguments(arch, fts, t) = (cpu_interpolating_time_indices(arch, fts.times, fts.time_indexing, t), fts.backend, fts.time_indexing)
+
 @kernel function _interpolate_primary_atmospheric_state!(surface_atmos_state,
                                                          space_fractional_indices,
-                                                         time_interpolator,
                                                          exchange_grid,
                                                          atmos_velocities,
+                                                         u_time_args,
+                                                         v_time_args,
                                                          atmos_tracers,
+                                                         T_time_args,
+                                                         q_time_args,
                                                          atmos_pressure,
+                                                         p_time_args,
                                                          rainfall_flux,
+                                                         rain_time_args,
                                                          snowfall_flux,
-                                                         atmos_backend,
-                                                         atmos_time_indexing)
+                                                         snow_time_args)
 
     i, j = @index(Global, NTuple)
 
@@ -108,17 +125,15 @@ end
     fj = get_fractional_index(i, j, jj)
 
     x_itp = FractionalIndices(fi, fj, nothing)
-    t_itp = time_interpolator
-    atmos_args = (x_itp, t_itp, atmos_backend, atmos_time_indexing)
 
-    uᵃᵗ = interp_atmos_time_series(atmos_velocities.u, atmos_args...)
-    vᵃᵗ = interp_atmos_time_series(atmos_velocities.v, atmos_args...)
-    Tᵃᵗ = interp_atmos_time_series(atmos_tracers.T,    atmos_args...)
-    qᵃᵗ = interp_atmos_time_series(atmos_tracers.q,    atmos_args...)
-    pᵃᵗ = interp_atmos_time_series(atmos_pressure,     atmos_args...)
+    uᵃᵗ = interp_atmos_time_series(atmos_velocities.u, x_itp, u_time_args...)
+    vᵃᵗ = interp_atmos_time_series(atmos_velocities.v, x_itp, v_time_args...)
+    Tᵃᵗ = interp_atmos_time_series(atmos_tracers.T,    x_itp, T_time_args...)
+    qᵃᵗ = interp_atmos_time_series(atmos_tracers.q,    x_itp, q_time_args...)
+    pᵃᵗ = interp_atmos_time_series(atmos_pressure,     x_itp, p_time_args...)
 
-    Mr = interp_atmos_time_series(rainfall_flux, atmos_args...)
-    Ms = interp_atmos_time_series(snowfall_flux, atmos_args...)
+    Mr = interp_atmos_time_series(rainfall_flux, x_itp, rain_time_args...)
+    Ms = interp_atmos_time_series(snowfall_flux, x_itp, snow_time_args...)
 
     # Convert atmosphere velocities (usually defined on a latitude-longitude grid) to
     # the frame of reference of the native grid
