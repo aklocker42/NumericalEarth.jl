@@ -155,11 +155,12 @@ parent's sea ice thickness `h`, concentration `ℵ` and velocities `u` and `v`. 
 On each:
 
 - `h` and `ℵ`: `ValueBoundaryCondition` toward the parent with `tracer_scheme`,
+- the snow thickness `hs`: `ValueBoundaryCondition(0)` with `tracer_scheme`, so that inflowing ice carries no snow,
 - the boundary-normal velocity: `NormalFlowBoundaryCondition` that lets the ice leave but not be pulled inward
   ([`SeaIceBoundaryVelocity`](@ref)).
 
 The tangential velocity keeps the condition of `sea_ice_simulation`'s `lateral_boundary_condition`.
-Returns a `NamedTuple` of `FieldBoundaryConditions` for `h`, `ℵ`, `u` and `v`, to pass as the `boundary_conditions`
+Returns a `NamedTuple` of `FieldBoundaryConditions` for `h`, `ℵ`, `hs`, `u` and `v`, to pass as the `boundary_conditions`
 of `sea_ice_simulation`.
 """
 function nested_sea_ice_boundary_conditions(ocean::Simulation, parent_ice::NamedTuple;
@@ -194,18 +195,21 @@ function nested_sea_ice_boundary_conditions(ocean::Simulation, parent_ice::Named
 
     h_bcs = Pair{Symbol, Any}[]
     ℵ_bcs = Pair{Symbol, Any}[]
+    hs_bcs = Pair{Symbol, Any}[]
     u_bcs = Pair{Symbol, Any}[]
     v_bcs = Pair{Symbol, Any}[]
 
     for side in keys(bands)
         push!(h_bcs, side => ValueBoundaryCondition(boundary_series(parent_ice.h, side); scheme = tracer_scheme))
         push!(ℵ_bcs, side => ValueBoundaryCondition(boundary_series(parent_ice.ℵ, side); scheme = tracer_scheme))
+        push!(hs_bcs, side => ValueBoundaryCondition(zero(eltype(grid)); scheme = tracer_scheme))
         normal_bcs = boundary_dimension(side) == 1 ? u_bcs : v_bcs
         push!(normal_bcs, side => NormalFlowBoundaryCondition(boundary_velocity(side)))
     end
 
     return (h = FieldBoundaryConditions(grid, (Center(), Center(), nothing); h_bcs...),
             ℵ = FieldBoundaryConditions(grid, (Center(), Center(), nothing); ℵ_bcs...),
+            hs = FieldBoundaryConditions(grid, (Center(), Center(), nothing); hs_bcs...),
             u = FieldBoundaryConditions(grid, (Face(), Center(), nothing); u_bcs...),
             v = FieldBoundaryConditions(grid, (Center(), Face(), nothing); v_bcs...))
 end

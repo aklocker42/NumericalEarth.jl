@@ -66,6 +66,11 @@ end
             @test bc.classification.scheme isa TracerReservoir
             @test bc.condition isa SeaIceBoundarySeries
         end
+
+        hs_bc = getproperty(bcs.hs, side)
+        @test hs_bc.classification isa Value
+        @test hs_bc.classification.scheme isa TracerReservoir
+        @test hs_bc.condition == 0
     end
 
     @test bcs.u.west.classification isa NormalFlow
