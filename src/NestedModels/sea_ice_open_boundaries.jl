@@ -3,7 +3,7 @@
 #####
 
 using ..DataWrangling: Metadata, bracketing_dates
-using Oceananigans.OutputReaders: Clamp
+using Oceananigans.OutputReaders: Clamp, FieldTimeSeries
 
 @inline zero_nan(x) = ifelse(isnan(x), zero(x), x)
 
@@ -78,7 +78,8 @@ end
 # Halo fills without the model fields (e.g. during `set!`) see no interior velocity.
 @inline interior_ice_velocity(::Val{1}, fields, i, j, grid) = @inbounds fields.u[i, j, 1]
 @inline interior_ice_velocity(::Val{2}, fields, i, j, grid) = @inbounds fields.v[i, j, 1]
-@inline interior_ice_velocity(dim, ::Nothing, i, j, grid) = zero(grid)
+@inline interior_ice_velocity(::Val{1}, ::Nothing, i, j, grid) = zero(grid)
+@inline interior_ice_velocity(::Val{2}, ::Nothing, i, j, grid) = zero(grid)
 
 @inline function BoundaryConditions.getbc(b::SeaIceBoundaryVelocity{1}, j::Integer, k::Integer, grid::AbstractGrid,
                                           clock=nothing, fields=nothing, args...)
