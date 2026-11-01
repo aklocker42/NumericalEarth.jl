@@ -3,6 +3,7 @@
 #####
 
 using ..DataWrangling: Metadata, bracketing_dates
+using ..SeaIces: sea_ice_simulation
 using Oceananigans.OutputReaders: Clamp, FieldTimeSeries
 
 @inline zero_nan(x) = ifelse(isnan(x), zero(x), x)
@@ -229,6 +230,50 @@ function set_parent_sea_ice!(sea_ice::Simulation, parent_ice::NamedTuple)
     for φ in (model.ice_thickness, model.ice_concentration)
         parent(φ) .= zero_nan.(parent(φ))
     end
+
+    return sea_ice
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Return a sea-ice `Simulation` over the nested `ocean` (a `Simulation` of a [`nested_ocean_model`](@ref)), the nested
+counterpart of [`sea_ice_simulation`](@ref), with the parent's sea ice read from `parent_dataset` over `dates`
+(see [`parent_sea_ice`](@ref)). The remaining keyword arguments go to
+`nested_sea_ice_simulation(ocean, parent_ice; tracer_scheme, boundary_conditions, kw...)`.
+"""
+function nested_sea_ice_simulation(ocean::Simulation, parent_dataset; dates,
+                                   dir = default_download_directory(parent_dataset),
+                                   parent_padding = default_horizontal_padding(parent_dataset),
+                                   time_indices_in_memory = 2,
+                                   kw...)
+
+    grid = ocean.model.child.grid
+    parent_ice = parent_sea_ice(grid, parent_dataset; dates, dir, parent_padding, time_indices_in_memory)
+
+    return nested_sea_ice_simulation(ocean, parent_ice; kw...)
+end
+
+"""
+$(TYPEDSIGNATURES)
+
+Return a sea-ice `Simulation` on the child grid of the nested `ocean`, with the parent's sea ice `parent_ice`
+(as for [`nested_sea_ice_boundary_conditions`](@ref)). The sea ice crosses the ocean's open sides through
+`nested_sea_ice_boundary_conditions(ocean, parent_ice; tracer_scheme)` and starts from the parent's thickness and
+concentration at the sea ice's time. `boundary_conditions` are merged with the nested ones, and the remaining keyword
+arguments go to [`sea_ice_simulation`](@ref).
+"""
+function nested_sea_ice_simulation(ocean::Simulation, parent_ice::NamedTuple;
+                                   tracer_scheme = default_tracer_scheme(),
+                                   boundary_conditions = NamedTuple(),
+                                   kw...)
+
+    grid = ocean.model.child.grid
+    nested_bcs = nested_sea_ice_boundary_conditions(ocean, parent_ice; tracer_scheme)
+    boundary_conditions = merge_field_boundary_conditions(NamedTuple(boundary_conditions), nested_bcs)
+
+    sea_ice = sea_ice_simulation(grid, ocean; boundary_conditions, kw...)
+    set_parent_sea_ice!(sea_ice, parent_ice)
 
     return sea_ice
 end

@@ -133,3 +133,26 @@ end
     @test all(isfinite, Array(interior(sea_ice.model.velocities.u)))
     @test all(isfinite, Array(interior(ocean.model.child.velocities.u)))
 end
+
+@testset "nested_sea_ice_simulation starts from the parent and steps with the ocean on $(arch)" for arch in test_architectures
+    ocean = nested_sea_ice_test_ocean(arch)
+    grid = ocean.model.child.grid
+    parent_ice = nested_sea_ice_test_parent(grid)
+
+    sea_ice = nested_sea_ice_simulation(ocean, parent_ice)
+    manual = sea_ice_simulation(grid, ocean; boundary_conditions = nested_sea_ice_boundary_conditions(ocean, parent_ice))
+    set_parent_sea_ice!(manual, parent_ice)
+
+    @test Array(interior(sea_ice.model.ice_thickness)) == Array(interior(manual.model.ice_thickness))
+    @test Array(interior(sea_ice.model.ice_concentration)) == Array(interior(manual.model.ice_concentration))
+    @test typeof(sea_ice.model.ice_thickness.boundary_conditions) == typeof(manual.model.ice_thickness.boundary_conditions)
+    @test typeof(sea_ice.model.velocities.u.boundary_conditions) == typeof(manual.model.velocities.u.boundary_conditions)
+
+    coupled = OceanSeaIceModel(ocean, sea_ice)
+    for _ in 1:3
+        time_step!(coupled, 10minutes)
+    end
+
+    @test all(isfinite, Array(interior(sea_ice.model.ice_thickness)))
+    @test all(isfinite, Array(interior(sea_ice.model.velocities.u)))
+end
