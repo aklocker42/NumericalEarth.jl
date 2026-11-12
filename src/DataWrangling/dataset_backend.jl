@@ -1,6 +1,8 @@
-using Oceananigans.OutputReaders: Cyclical, AbstractInMemoryBackend, FlavorOfFTS, time_indices
+using Oceananigans.OutputReaders: Cyclical, AbstractInMemoryBackend, FlavorOfFTS, time_indices, in_time_range
+using Oceananigans.DistributedComputations: Distributed
+using Oceananigans.Architectures: architecture, child_architecture, synchronize
 
-import Oceananigans.OutputReaders: new_backend
+import Oceananigans.OutputReaders: new_backend, update_field_time_series!
 import Oceananigans.Fields: set!
 
 @inline instantiate(T::DataType) = T()
@@ -91,10 +93,29 @@ function set!(fts::DatasetFieldTimeSeries, backend=fts.backend)
 
     for t in time_indices(fts)
         metadatum = @inbounds backend.metadata[t]
+        # Flush prior fill_halo_regions! asyncmap kernels before fts[t] allocates buffers on the same streams (CUDA 700).
+        synchronize(child_architecture(architecture(fts.grid)))
         set!(fts[t], metadatum; inpainting, cache_inpainted_data=cache_data)
     end
 
-    fill_halo_regions!(fts)
+    # Skip the collective fill on Distributed grids: ranks advance different FTS sets (OBC FTS are boundary-only), so this deadlocks.
+    if !(architecture(fts.grid) isa Distributed)
+        fill_halo_regions!(fts)
+    end
 
+    return nothing
+end
+
+# Overrides Oceananigans' default post-`set!` fill, which deadlocks here for the same reason as above.
+function update_field_time_series!(fts::DatasetFieldTimeSeries, n₁::Int, n₂=n₁)
+    in_range = in_time_range(fts, fts.time_indexing, n₁, n₂)
+    if !in_range
+        Nm = length(fts.backend)
+        fts.backend = new_backend(fts.backend, n₁, Nm)
+        set!(fts)
+        if !(architecture(fts.grid) isa Distributed)
+            fill_halo_regions!(fts)
+        end
+    end
     return nothing
 end

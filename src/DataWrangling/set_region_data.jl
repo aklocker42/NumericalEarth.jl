@@ -47,10 +47,11 @@ struct AverageNorthSouth end
 # Clamp indices to avoid out-of-bounds access
 @inline clamp_i(i, data) = clamp(i, 1, size(data, 1))
 @inline clamp_j(j, data) = clamp(j, 1, size(data, 2))
-@inline mangle(i, j, k, data, ::Nothing) = @inbounds data[clamp_i(i, data), clamp_j(j, data), k]
-@inline mangle(i, j, k, data, ::ShiftSouth) = @inbounds data[clamp_i(i, data), clamp_j(j - 1, data), k]
+@inline clamp_k(k, data) = clamp(k, 1, size(data, 3))
+@inline mangle(i, j, k, data, ::Nothing) = @inbounds data[clamp_i(i, data), clamp_j(j, data), clamp_k(k, data)]
+@inline mangle(i, j, k, data, ::ShiftSouth) = @inbounds data[clamp_i(i, data), clamp_j(j - 1, data), clamp_k(k, data)]
 @inline mangle(i, j, k, data, ::AverageNorthSouth) =
-    @inbounds (data[clamp_i(i, data), clamp_j(j, data), k] + data[clamp_i(i, data), clamp_j(j + 1, data), k]) / 2
+    @inbounds (data[clamp_i(i, data), clamp_j(j, data), clamp_k(k, data)] + data[clamp_i(i, data), clamp_j(j + 1, data), clamp_k(k, data)]) / 2
 
 #####
 ##### Region-aware filling for Fields and FieldTimeSeries via a single kernel.

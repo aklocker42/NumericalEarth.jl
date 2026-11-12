@@ -2,7 +2,7 @@ using NCDatasets
 using JLD2
 using KernelAbstractions: @kernel, @index
 using Oceananigans.Grids: λnodes, φnodes, Periodic, Bounded, AbstractMutableGrid, interior_indices, ξnode, ηnode, znode
-using Oceananigans.Architectures: on_architecture
+using Oceananigans.Architectures: on_architecture, synchronize
 using Oceananigans.BoundaryConditions: fill_halo_regions!
 using Oceananigans.Fields: interpolate, interpolate!
 using Oceananigans.Utils: launch!, KernelParameters
@@ -126,7 +126,7 @@ function construct_native_grid(metadata, ::Nothing, arch; halo)
                                      halo, longitude, latitude, z = z)
     else
         return LatitudeLongitudeGrid(arch, FT; size = (Nx, Ny),
-                                     halo = halo[1:2], longitude, latitude,
+                                     halo = halo[1:2], longitude, latitude, z = nothing,
                                      topology = (Periodic, Bounded, Flat))
     end
 end
@@ -161,7 +161,7 @@ function construct_native_grid(metadata, bbox::BoundingBox, arch; halo)
                                      topology = (TX, Bounded, Bounded))
     else
         return LatitudeLongitudeGrid(arch, FT; size = (Nx, Ny),
-                                     halo = halo[1:2], longitude, latitude,
+                                     halo = halo[1:2], longitude, latitude, z = nothing,
                                      topology = (TX, Bounded, Flat))
     end
 end
@@ -208,6 +208,9 @@ function retrieve_data(metadata::Metadatum)
 
     close(ds)
 
+    # missing → NaN so inpainting (which skips NaN, not 0.0) correctly treats masked cells as land.
+    data = replace(data, missing => NaN)
+
     # ERA5 (and some other datasets) store latitude north-to-south;
     # flip to south-to-north to match the grid.
     if reversed_latitude_axis(metadata.dataset)
@@ -248,6 +251,9 @@ function Oceananigans.Fields.Field(metadata::Metadatum, arch=CPU();
 
     grid = native_grid(metadata, arch; halo)
     LX, LY, LZ = location(metadata)
+
+    # Flush prior fill_halo_regions! asyncmap kernels before the distributed Field constructor's HtoD copy races them (CUDA 700).
+    synchronize(child_architecture(architecture(grid)))
     field = Field{LX, LY, LZ}(grid)
 
     if !isnothing(inpainting)
@@ -278,6 +284,8 @@ function Oceananigans.Fields.Field(metadata::Metadatum, arch=CPU();
 
     set_metadata_field!(field, data, metadata)
     fill_halo_regions!(field)
+    # Flush fill_halo_regions!'s asyncmap kernels before field can be GC'd and its buffers freed out from under them (CUDA 700).
+    synchronize(child_architecture(architecture(field)))
 
     if !isnothing(inpainting)
         # Respect user-supplied mask, but otherwise build default mask for this dataset.
@@ -300,16 +308,19 @@ function Oceananigans.Fields.Field(metadata::Metadatum, arch=CPU();
 
         inpaint_mask!(field, mask; inpainting)
         fill_halo_regions!(field)
+        synchronize(child_architecture(architecture(field)))
 
         elapsed = 1e-9 * (time_ns() - start_time)
         @info string(" ... (", prettytime(elapsed), ")")
 
-        # We cache the inpainted data to avoid recomputing it
-        @root if cache_inpainted_data
-            file = jldopen(inpainted_path, "w+")
+        # Write-to-temp + atomic rename instead of @root: this can run mid-simulation with rank-asymmetric participation (OBC FTS), where @root's MPI.Barrier deadlocks.
+        if cache_inpainted_data
+            tmp_path = tempname(dirname(abspath(inpainted_path))) * "_inpainted.tmp.jld2"
+            file = jldopen(tmp_path, "w+")
             file["data"] = on_architecture(CPU(), parent(field))
             file["inpainting_maxiter"] = inpainting.maxiter
             close(file)
+            mv(tmp_path, inpainted_path; force=true)
         end
     end
 
@@ -331,31 +342,59 @@ end
     interpolate_physical!(to_field, from_field)
 
 Interpolate `from_field` onto `to_field`. Identical to Oceananigans'
-`interpolate!` for ordinary grids, but on a `MutableVerticalDiscretization`
-(terrain-following) target it samples the source at the target's *deformed*
-`znode` rather than the reference `rnode`. `interpolate!` builds its target node
-from `_node`, whose vertical component is `rnode`, so it would place the source
-at the LAM's reference heights and ignore the terrain — putting the lowest cells
-below the (clipped) surface of a `PressureLevelGrid` source.
+`interpolate!` for ordinary grids, with two exceptions:
+
+* On a `MutableVerticalDiscretization` (terrain-following) target it samples
+  the source at the target's *deformed* `znode` rather than the reference
+  `rnode`. `interpolate!` builds its target node from `_node`, whose vertical
+  component is `rnode`, so it would place the source at the LAM's reference
+  heights and ignore the terrain — putting the lowest cells below the
+  (clipped) surface of a `PressureLevelGrid` source.
+
+* On a `Distributed` target grid only the interior is interpolated (halo
+  cells are skipped).  Including halo cells causes an out-of-bounds GPU
+  memory access in the `MutableVerticalDiscretization` znode kernel: at
+  Face-in-x location, `ℑxᶠᵃᵃ(i, j, 1, grid, ηⁿ)` reads `ηⁿ[i-1]`, which
+  steps one element before `ηⁿ`'s allocation at the outermost halo cell
+  `i = 1-Hx` → CUDA error 700.  Local (z, y) boundary-condition halos are
+  still filled by the `fill_halo_regions!` call below; distributed (x) halos
+  are left for the first collective halo fill in the run.  Any MPI/NCCL in
+  this path deadlocks because the set and order of FTS differs between ranks
+  (e.g. OBC FTS only exist on domain-boundary ranks).
 
 !!! note "TODO"
-    Drop this once Oceananigans' `interpolate!` resolves the target vertical node
-    from the physical `znode` for mutable grids.
+    Drop the mutable-grid part once Oceananigans' `interpolate!` resolves the
+    target vertical node from the physical `znode` for mutable grids.
 """
 function interpolate_physical!(to_field, from_field)
-    to_field.grid isa AbstractMutableGrid || return interpolate!(to_field, from_field)
+    to_grid     = to_field.grid
+    mutable     = to_grid isa AbstractMutableGrid
+    distributed = architecture(to_grid) isa DistributedComputations.Distributed
 
-    to_grid       = to_field.grid
+    mutable || distributed || return interpolate!(to_field, from_field)
+
     from_grid     = from_field.grid
     arch          = child_architecture(to_grid)
     from_location = Tuple(L() for L in location(from_field))
     to_location   = Tuple(L() for L in location(to_field))
-    params        = KernelParameters(interior_indices(to_field))
 
-    launch!(arch, to_grid, params, _interpolate_physical!,
+    # Interior indices only: halo cells trigger an OOB znode read at the outermost halo cell on MutableVerticalDiscretization grids.
+    indices = interior_indices(to_field)
+    params = KernelParameters(indices)
+
+    # _interpolate_physical! handles the mutable-grid deformed znode; Oceananigans' _interpolate! also handles reduced (e.g. 2D) locations, which it doesn't.
+    kernel! = mutable ? _interpolate_physical! : Oceananigans.Fields._interpolate!
+
+    launch!(arch, to_grid, params, kernel!,
             to_field, to_grid, to_location, from_field, from_grid, from_location)
 
-    fill_halo_regions!(to_field)
+    if distributed
+        fill_halo_regions!(to_field; only_local_halos = true)
+    else
+        fill_halo_regions!(to_field)
+    end
+    synchronize(arch)
+
     return to_field
 end
 

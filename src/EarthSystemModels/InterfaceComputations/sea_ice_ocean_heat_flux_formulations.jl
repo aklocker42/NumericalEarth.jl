@@ -240,7 +240,7 @@ Returns `(Q, Tᵦ, Sᵦ)` where:
     T★, S★, q = solve_interface_conditions(flux, Tᵒᶜ, Sᵒᶜ, ice_state, αₕ, αₛ, u★, ℰ, ρᵒᶜ, cᵒᶜ, liquidus)
 
     # Scale by ice concentration
-    Qᵢₒ = ℰ * q * ℵ
+    Qᵢₒ = ρᵒᶜ * cᵒᶜ * αₕ * u★ * (Tᵒᶜ - T★) * ℵ
 
     return Qᵢₒ, T★, S★
 end
