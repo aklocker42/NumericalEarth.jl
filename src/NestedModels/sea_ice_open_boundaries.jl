@@ -44,7 +44,8 @@ at the boundary-adjacent `cell`, or, where the parent's ice is free drifting wit
 own, the nested ocean's boundary-normal `ocean_velocity` band at level `surface`. With the interior velocity `uᴵ` on
 the first interior face and `inward` the sign of the inward normal:
 
-- exterior inflow: `uᴵ`, so the boundary row does not diverge,
+- exterior inflow: the faster inflow of the exterior velocity and `uᴵ`, so ice enters ice-free boundary cells
+  and the boundary row does not diverge,
 - exterior outflow: `uᴵ`, without its inward part,
 - no parent ice (`concentration` zero or missing): `uᴵ`.
 """
@@ -73,7 +74,8 @@ Oceananigans.Architectures.on_architecture(to, b::SeaIceBoundaryVelocity{Dim}) w
 @inline function boundary_ice_velocity(uᵢ, ℵ, uₒ, uᴵ, inward)
     uᵉˣᵗ = ifelse(isnan(uᵢ) | iszero(uᵢ), uₒ, uᵢ)
     uᵒᵘᵗ = ifelse(inward * uᴵ > 0, zero(uᴵ), uᴵ)
-    uᵇ   = ifelse(inward * uᵉˣᵗ > 0, uᴵ, uᵒᵘᵗ)
+    uⁱⁿ  = ifelse(inward * uᴵ > inward * uᵉˣᵗ, uᴵ, uᵉˣᵗ)
+    uᵇ   = ifelse(inward * uᵉˣᵗ > 0, uⁱⁿ, uᵒᵘᵗ)
     return ifelse(isnan(ℵ) | iszero(ℵ), uᴵ, uᵇ)
 end
 
